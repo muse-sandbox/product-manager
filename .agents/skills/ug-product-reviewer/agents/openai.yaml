@@ -1,0 +1,7 @@
+interface:
+  display_name: "UG Product Reviewer"
+  short_description: "Audit product decisions independently"
+  default_prompt: "Use $ug-product-reviewer to audit this Claude Code draft for evidence, product logic, and decision readiness."
+
+policy:
+  allow_implicit_invocation: true
