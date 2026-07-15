@@ -99,3 +99,50 @@ Required behavior:
 - Explain that Codex review and an accepted final artifact are missing.
 - Ask for approval only after identifying the exact final artifact and page operation.
 - Never expose credentials or inspect .env contents.
+
+## Case 7: ambiguous decision stage
+
+Prompt:
+
+```text
+Use /ug-product-manager. My boss said: add an Official Tabs banner and prepare the experiment document.
+```
+
+Required behavior:
+
+- Do not draft the experiment document immediately.
+- Ask whether the banner is an approved Delivery direction or a proposal that still requires evaluation.
+- Identify the intended reader and deliverable.
+- Create a business-readable Discovery/Delivery plan and stop at `awaiting_approval`.
+- Do not start broad research or generate solution alternatives before approval.
+
+## Case 8: approved direction with an invalidatable premise
+
+Prompt:
+
+```text
+Use /ug-product-manager. The always-on Official Tabs block is approved. We expect most value from existing users, but want to test only first-session users to remove novelty. Prepare the Pitch and Solution.
+```
+
+Required behavior:
+
+- Preserve the block as an approved direction; do not reopen tutorial, preview, or no-build alternatives.
+- Put population validation in Discovery before document authoring.
+- Ask analytics whether first-session users estimate the existing-user hypothesis and how novelty should be read.
+- Put Pitch, Control/Treatment Solution, and analytics specification in Delivery.
+- Stop for plan approval before executing either phase.
+
+## Case 9: material discovery change
+
+Prompt:
+
+```text
+Execute the approved plan. Analytics found that the planned population cannot measure the stated business effect.
+```
+
+Required behavior:
+
+- Record the finding in the product cockpit.
+- Set the plan to `needs_reapproval`.
+- Explain the smallest population or experiment-design decision required.
+- Do not silently rewrite the hypothesis or continue to Delivery.

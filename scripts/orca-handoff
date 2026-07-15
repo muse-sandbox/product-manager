@@ -7,6 +7,7 @@ readonly ROOT="${SCRIPT_DIR:h}"
 readonly DRAFT_DIR="$ROOT/workspace/drafts/claude"
 readonly REVIEW_DIR="$ROOT/workspace/reviews/codex"
 readonly LOG_DIR="$ROOT/.orca/logs"
+readonly PLAN_STATE_DIR="$ROOT/.orca/state/plans"
 readonly LOCK_DIR="$ROOT/.orca/handoff.lock"
 readonly CLAUDE_HANDLE="${1:-}"
 
@@ -59,8 +60,50 @@ terminal_handle() {
   ] | map(select(type == "string" and length > 0)) | .[0] // empty'
 }
 
+task_id() {
+  jq -r '[
+    .result.task.id?,
+    .result.taskId?,
+    .result.id?,
+    .task.id?,
+    .taskId?,
+    .id?
+  ] | map(select(type == "string" and length > 0)) | .[0] // empty'
+}
+
 relative_path() {
   print -r -- "${1#$ROOT/}"
+}
+
+frontmatter_value() {
+  local file="$1"
+  local key="$2"
+  sed -n '1,45p' "$file" | awk -v key="$key" '
+    $0 ~ "^" key ":[[:space:]]*" {
+      sub("^" key ":[[:space:]]*", "")
+      gsub(/[\047\042]/, "")
+      print
+      exit
+    }'
+}
+
+approved_plan_for_draft() {
+  local draft="$1"
+  local rel_plan plan slug state plan_state handled resolution lower
+  rel_plan=$(frontmatter_value "$draft" product_plan)
+  [[ -n "$rel_plan" && "$rel_plan" == workspace/plans/*.json && "$rel_plan" != *..* ]] || return 1
+  plan="$ROOT/$rel_plan"
+  [[ -f "$plan" ]] || return 1
+  slug=$(jq -r '.slug // empty' "$plan" 2>/dev/null)
+  [[ -n "$slug" ]] || return 1
+  state="$PLAN_STATE_DIR/$slug.json"
+  [[ -f "$state" ]] || return 1
+  plan_state=$(jq -r '.status // empty' "$plan")
+  handled=$(jq -r '.gate_handled // false' "$state")
+  resolution=$(jq -r '.resolution // empty' "$state")
+  lower=$(print -r -- "$resolution" | tr '[:upper:]' '[:lower:]')
+  [[ "$plan_state" == "approved" || "$plan_state" == "in_progress" || "$plan_state" == "completed" ]] || return 1
+  [[ "$handled" == "true" && ( "$lower" == *approve* || "$lower" == *execute* || "$lower" == "yes" ) ]]
 }
 
 review_path_for() {
@@ -87,6 +130,7 @@ next_pending_draft() {
   local draft review current_hash previous_hash
   for draft in "$DRAFT_DIR"/*.md(N); do
     frontmatter_status_is_ready "$draft" || continue
+    approved_plan_for_draft "$draft" || continue
     review=$(review_path_for "$draft")
     current_hash=$(draft_hash "$draft")
     previous_hash=$(reviewed_hash "$review")
@@ -98,9 +142,46 @@ next_pending_draft() {
   return 1
 }
 
+next_unapproved_draft() {
+  local draft review current_hash previous_hash
+  for draft in "$DRAFT_DIR"/*.md(N); do
+    frontmatter_status_is_ready "$draft" || continue
+    review=$(review_path_for "$draft")
+    current_hash=$(draft_hash "$draft")
+    previous_hash=$(reviewed_hash "$review")
+    [[ "$current_hash" == "$previous_hash" ]] && continue
+    approved_plan_for_draft "$draft" && continue
+    print -r -- "$draft"
+    return 0
+  done
+  return 1
+}
+
 notify_claude() {
   local message="$1"
   "$ORCA" terminal send --terminal "$CLAUDE_HANDLE" --text "$message" --enter --json >/dev/null
+}
+
+dispatch_review_to_claude() {
+  local rel_draft="$1"
+  local rel_review="$2"
+  local draft_sha="$3"
+  local title spec create_json revision_task
+
+  title="Resolve product review · ${rel_draft:t:r}"
+  spec="Codex completed the independent review of $rel_draft at $rel_review. The review is bound to draft SHA-256 $draft_sha. Read the review now. Resolve every BLOCKER and MAJOR finding, or record a source-backed disagreement. Do not repeat broad source research for unchanged supported claims. Save the accepted artifact under workspace/final/ with a link to the review. Update the approved product cockpit with the review outcome. Do not publish to Confluence without explicit user approval."
+  create_json=$("$ORCA" orchestration task-create \
+    --task-title "$title" \
+    --display-name "$title" \
+    --spec "$spec" \
+    --json) || return 1
+  revision_task=$(print -r -- "$create_json" | task_id)
+  [[ -n "$revision_task" ]] || return 1
+  "$ORCA" orchestration dispatch \
+    --task "$revision_task" \
+    --to "$CLAUDE_HANDLE" \
+    --inject \
+    --json >/dev/null
 }
 
 review_draft() {
@@ -113,7 +194,7 @@ review_draft() {
   rel_review=$(relative_path "$review")
   output_file="$LOG_DIR/${draft:t:r}-codex-last-message.md"
 
-  prompt="Use \$ug-product-reviewer to independently review $rel_draft. Read the exact draft and its cited sources. Do not edit the Claude draft. Save the complete review to $rel_review. The YAML header must include draft: $rel_draft and draft_sha256: $current_hash. Follow the verdict and severity contract in the skill. Do not publish or write to Confluence."
+  prompt="Use \$ug-product-reviewer to independently review $rel_draft. Read the exact draft, its cited sources, and the matching approved product plan under workspace/plans/ when present. Verify plan adherence without reopening fixed Delivery decisions. Do not edit the Claude draft. Save the complete review to $rel_review. The YAML header must include draft: $rel_draft and draft_sha256: $current_hash. Follow the verdict, quality-score, and severity contract in the skill. Do not publish or write to Confluence."
   codex_command="exec ${(q)CODEX} exec -C ${(q)ROOT} -s workspace-write -o ${(q)output_file} ${(q)prompt}"
 
   log "Starting Codex review for $rel_draft"
@@ -144,11 +225,20 @@ review_draft() {
   fi
 
   log "Codex review is ready: $rel_review"
-  notify_claude "Codex finished the independent review: $rel_review. Read it now. Resolve every BLOCKER and MAJOR finding, or record a source-backed disagreement. Save the accepted artifact under workspace/final/ with a link to this review. Do not publish to Confluence without explicit user approval."
+  dispatch_review_to_claude "$rel_draft" "$rel_review" "$current_hash" || {
+    notify_claude "Codex finished the independent review: $rel_review, but Orca could not create the revision task. Read it now and resolve every BLOCKER and MAJOR finding before saving workspace/final/."
+    return 1
+  }
+  log "Codex review was dispatched back to Claude as a tracked revision task."
 }
 
 if [[ "$CLAUDE_HANDLE" == "--check" ]]; then
   cd "$ROOT" || exit 2
+  unapproved=$(next_unapproved_draft)
+  if [[ -n "$unapproved" ]]; then
+    print -- "UNAPPROVED $(relative_path "$unapproved") — add product_plan and obtain the Orca approval gate before review"
+    exit 11
+  fi
   pending=$(next_pending_draft)
   if [[ -n "$pending" ]]; then
     print -- "PENDING $(relative_path "$pending")"

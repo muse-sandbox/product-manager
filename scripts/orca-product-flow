@@ -8,6 +8,7 @@ readonly PROJECTS_ROOT="${PROJECTS_ROOT:-${ROOT:h}}"
 readonly ANALYTICS="${UG_ANALYTICS_DIR:-$PROJECTS_ROOT/ug-analytics}"
 readonly CONFLUENCE="${CONFLUENCE_TOOLS_DIR:-$PROJECTS_ROOT/work/automations/confluence_tools}"
 readonly HANDOFF="$SCRIPT_DIR/orca-handoff"
+readonly PLAN_GATE="$SCRIPT_DIR/orca-plan-gate"
 
 application_cli() {
   local application_name="$1"
@@ -62,6 +63,7 @@ terminal_handle() {
 [[ -n "$ORCA" && -x "$ORCA" ]] || fail "Orca CLI not found. Put 'orca' on PATH or set ORCA_BIN."
 [[ -n "$CLAUDE" && -x "$CLAUDE" ]] || fail "Claude Code not found. Put 'claude' on PATH or set CLAUDE_BIN."
 [[ -x "$HANDOFF" ]] || fail "handoff runner is not executable: $HANDOFF"
+[[ -x "$PLAN_GATE" ]] || fail "plan gate runner is not executable: $PLAN_GATE"
 [[ -d "$ANALYTICS" ]] || fail "ug-analytics not found: $ANALYTICS. Set UG_ANALYTICS_DIR."
 [[ -d "$CONFLUENCE" ]] || fail "Confluence tools not found: $CONFLUENCE. Set CONFLUENCE_TOOLS_DIR."
 command -v jq >/dev/null || fail "jq is required"
@@ -87,6 +89,15 @@ claude_json=$("$ORCA" terminal create \
 claude_handle=$(print -r -- "$claude_json" | terminal_handle)
 [[ -n "$claude_handle" ]] || fail "Orca created Claude, but returned no terminal handle"
 
+plan_gate_command="exec ${(q)PLAN_GATE} ${(q)claude_handle}"
+plan_gate_json=$("$ORCA" terminal create \
+  --worktree "path:$ROOT" \
+  --title "Orca · Product plan approval" \
+  --command "$plan_gate_command" \
+  --json)
+plan_gate_handle=$(print -r -- "$plan_gate_json" | terminal_handle)
+[[ -n "$plan_gate_handle" ]] || fail "Orca created the plan gate, but returned no terminal handle"
+
 handoff_command="exec ${(q)HANDOFF} ${(q)claude_handle}"
 handoff_json=$("$ORCA" terminal create \
   --worktree "path:$ROOT" \
@@ -98,4 +109,5 @@ handoff_handle=$(print -r -- "$handoff_json" | terminal_handle)
 
 print -- "UG Product Flow is running in Orca."
 print -- "Claude terminal: $claude_handle"
+print -- "Plan approval terminal: $plan_gate_handle"
 print -- "Handoff terminal: $handoff_handle"

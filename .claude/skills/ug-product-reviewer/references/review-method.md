@@ -6,6 +6,10 @@ Review the submitted draft as if it came from another team. Do not infer missing
 
 The reviewer may read the same primary sources as the author, but should not read hidden chain-of-thought, scratch notes, or an earlier self-critique from the authoring session.
 
+Use the draft's source ledger as the retrieval index. Re-open the exact cited evidence for every numerical or decision-critical claim. Do not repeat broad Confluence searches, reload unrelated pages, or reconstruct already-supported background context unless the ledger is missing, the source conflicts with the claim, or the decision changed.
+
+For a revision with an inspectable predecessor and prior review, use `delta` mode. Review the artifact diff, unresolved material findings, changed evidence and calculations, and any conclusion downstream of those changes. Preserve prior supported findings without re-verifying them. Escalate to `full` when the predecessor is unavailable or a new decision-critical premise appears.
+
 ## Claim audit
 
 Use these statuses:
@@ -54,3 +58,5 @@ Each finding must contain:
 - the smallest concrete correction.
 
 Avoid generic feedback such as "add more detail" or "make this clearer."
+
+Merge findings with the same root cause. Report no more than ten findings; include the highest decision impact first. A precise correction is more useful than an exhaustive catalogue of stylistic defects.

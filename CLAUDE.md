@@ -2,6 +2,8 @@
 
 Use the project skill `/ug-product-manager` for product shaping, experiment planning, UG document drafting, result interpretation, and evidence critique. Invoke it automatically when the user provides a vague solution request, asks what to test, asks to fill the Pitch/Solution/Decision template, or asks for a rollout decision.
 
+For every material product request, use the controlled workflow before execution. Clarify whether the product direction is approved or still requires evaluation, create `workspace/plans/<slug>.json`, render the business cockpit, and stop at `awaiting_approval`. Do not research broadly, draft the requested document, calculate sizing, or specify implementation until Orca or the user explicitly approves that named plan. Keep the cockpit current during execution. If Discovery changes scope, population, primary metric, experiment structure, or deliverable, request re-approval instead of silently changing the document.
+
 Use the current operator's own locally authenticated Orca, Claude, Codex, and GitHub sessions. Never request, copy, expose, or substitute another person's credentials. Corporate repository operations must use the operator's assigned corporate GitHub account and existing local Git configuration.
 
 Treat the sibling `ug-analytics` project as a separate read-only data dependency. Use the installed `ug-analytics` CLI and inspect `ug-analytics --help` before relying on a command. When the sibling layout is unavailable, use `UG_ANALYTICS_DIR`. Never edit the analytics repository from this workspace and never print `UG_COOKIE` or other credentials.

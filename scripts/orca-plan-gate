@@ -1,0 +1,256 @@
+#!/bin/zsh
+
+set -u
+
+readonly SCRIPT_DIR="${0:A:h}"
+readonly ROOT="${SCRIPT_DIR:h}"
+readonly PLAN_DIR="$ROOT/workspace/plans"
+readonly STATE_DIR="$ROOT/.orca/state/plans"
+readonly PRODUCT_PLAN="$SCRIPT_DIR/product-plan"
+readonly CLAUDE_HANDLE="${1:-}"
+
+application_cli() {
+  local application_name="$1"
+  local relative_cli="$2"
+  local application_path
+
+  application_path=$(osascript -e "POSIX path of (path to application \"$application_name\")" 2>/dev/null) || return 1
+  print -r -- "${application_path%/}/$relative_cli"
+}
+
+resolve_cli() {
+  local override="$1"
+  local command_name="$2"
+  local application_name="$3"
+  local relative_cli="$4"
+  local discovered
+
+  if [[ -n "$override" ]]; then
+    print -r -- "$override"
+    return 0
+  fi
+  discovered=$(command -v "$command_name" 2>/dev/null) && {
+    print -r -- "$discovered"
+    return 0
+  }
+  application_cli "$application_name" "$relative_cli"
+}
+
+readonly ORCA="$(resolve_cli "${ORCA_BIN:-}" orca "Orca 2" "Contents/Resources/bin/orca" || true)"
+
+log() {
+  print -- "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+json_id() {
+  local kind="$1"
+  if [[ "$kind" == "task" ]]; then
+    jq -r '[
+      .result.task.id?, .result.taskId?, .result.id?,
+      .task.id?, .taskId?, .id?
+    ] | map(select(type == "string" and length > 0)) | .[0] // empty'
+  else
+    jq -r '[
+      .result.gate.id?, .result.gateId?, .result.id?,
+      .gate.id?, .gateId?, .id?
+    ] | map(select(type == "string" and length > 0)) | .[0] // empty'
+  fi
+}
+
+plan_status() {
+  jq -r '.status // empty' "$1" 2>/dev/null
+}
+
+plan_hash() {
+  shasum -a 256 "$1" | awk '{print $1}'
+}
+
+state_path_for() {
+  local plan="$1"
+  local slug
+  slug=$(jq -r '.slug' "$plan")
+  print -r -- "$STATE_DIR/$slug.json"
+}
+
+state_needs_registration() {
+  local plan="$1"
+  local state="$2"
+  local current_hash recorded_hash handled
+
+  [[ "$(plan_status "$plan")" == "awaiting_approval" || "$(plan_status "$plan")" == "needs_reapproval" ]] || return 1
+  [[ -f "$state" ]] || return 0
+  current_hash=$(plan_hash "$plan")
+  recorded_hash=$(jq -r '.plan_hash // empty' "$state")
+  handled=$(jq -r '.gate_handled // false' "$state")
+  [[ "$current_hash" != "$recorded_hash" || "$handled" == "true" ]]
+}
+
+create_task() {
+  local title="$1"
+  local display="$2"
+  local spec="$3"
+  local parent="${4:-}"
+  local output
+  local args=(orchestration task-create --task-title "$title" --display-name "$display" --spec "$spec")
+  [[ -n "$parent" ]] && args+=(--parent "$parent")
+  args+=(--json)
+  output=$("$ORCA" "${args[@]}") || return 1
+  print -r -- "$output" | json_id task
+}
+
+register_plan() {
+  local plan="$1"
+  local state="$2"
+  local slug title plan_state markdown summary parent_json parent_id gate_json gate_id question
+  local task_id task_title task_spec child_id mapping='{}' round=1 old_round=0 hash temp_state
+
+  "$PRODUCT_PLAN" validate "$plan" >/dev/null || return 1
+  "$PRODUCT_PLAN" render "$plan" >/dev/null || return 1
+  slug=$(jq -r '.slug' "$plan")
+  title=$(jq -r '.title' "$plan")
+  plan_state=$(jq -r '.status' "$plan")
+  markdown="${plan:r}.md"
+  summary=$("$PRODUCT_PLAN" summary "$plan")
+  [[ -f "$state" ]] && old_round=$(jq -r '.round // 0' "$state")
+  round=$((old_round + 1))
+
+  parent_json=$("$ORCA" orchestration task-create \
+    --task-title "$title" \
+    --display-name "Product plan · $title" \
+    --spec "$summary" \
+    --json) || return 1
+  parent_id=$(print -r -- "$parent_json" | json_id task)
+  [[ -n "$parent_id" ]] || return 1
+
+  for task_id in $(jq -r '.tasks[].id' "$plan"); do
+    task_title=$(jq -r --arg id "$task_id" '.tasks[] | select(.id == $id) | "[" + .phase + "] " + .title' "$plan")
+    task_spec=$(jq -r --arg id "$task_id" '.tasks[] | select(.id == $id) | "Business question/output: " + .title + "\nWhy it matters: " + .why + "\nOwner: " + .owner + "\nDone when: " + .done_when' "$plan")
+    child_id=$(create_task "$task_title" "$task_title" "$task_spec" "$parent_id") || return 1
+    [[ -n "$child_id" ]] || return 1
+    mapping=$(print -r -- "$mapping" | jq --arg key "$task_id" --arg value "$child_id" '.[$key] = $value')
+  done
+
+  if [[ "$plan_state" == "needs_reapproval" ]]; then
+    question="Discovery changed a material premise in '$title'. Approve the revised product plan before work resumes? Review $markdown"
+  else
+    question="Approve this Discovery/Delivery plan before the product agent starts '$title'? Review $markdown"
+  fi
+  gate_json=$("$ORCA" orchestration gate-create \
+    --task "$parent_id" \
+    --question "$question" \
+    --options '["Approve and execute","Revise before execution","Reject"]' \
+    --json) || return 1
+  gate_id=$(print -r -- "$gate_json" | json_id gate)
+  [[ -n "$gate_id" ]] || return 1
+
+  hash=$(plan_hash "$plan")
+  temp_state=$(mktemp "$STATE_DIR/.${slug}.XXXXXX")
+  jq -n \
+    --arg plan "${plan#$ROOT/}" \
+    --arg plan_hash "$hash" \
+    --arg parent_task_id "$parent_id" \
+    --arg gate_id "$gate_id" \
+    --argjson task_ids "$mapping" \
+    --argjson round "$round" \
+    '{plan: $plan, plan_hash: $plan_hash, parent_task_id: $parent_task_id, gate_id: $gate_id, task_ids: $task_ids, round: $round, gate_handled: false}' > "$temp_state"
+  mv "$temp_state" "$state"
+
+  "$ORCA" file open "$markdown" --worktree "path:$ROOT" --json >/dev/null 2>&1 || true
+  log "Approval needed: $title (round $round). The business plan is open in Orca."
+}
+
+gate_record() {
+  local state="$1"
+  local parent gate
+  parent=$(jq -r '.parent_task_id' "$state")
+  gate=$(jq -r '.gate_id' "$state")
+  "$ORCA" orchestration gate-list --task "$parent" --json 2>/dev/null | jq -c --arg id "$gate" '
+    [.. | objects | select((.id? // .gateId? // "") == $id)] | .[0] // {}'
+}
+
+update_state_handled() {
+  local state="$1"
+  local resolution="$2"
+  local temp_state
+  temp_state=$(mktemp "$STATE_DIR/.state.XXXXXX")
+  jq --arg resolution "$resolution" '.gate_handled = true | .resolution = $resolution' "$state" > "$temp_state"
+  mv "$temp_state" "$state"
+}
+
+notify_claude() {
+  local message="$1"
+  "$ORCA" terminal send --terminal "$CLAUDE_HANDLE" --text "$message" --enter --json >/dev/null 2>&1
+}
+
+handle_gate() {
+  local state="$1"
+  local record gate_state resolution lower parent plan rel_plan
+  record=$(gate_record "$state") || return 0
+  gate_state=$(print -r -- "$record" | jq -r '.status // .state // empty')
+  resolution=$(print -r -- "$record" | jq -r '.resolution // .answer // .value // empty')
+  [[ "$gate_state" == "resolved" || "$gate_state" == "completed" || -n "$resolution" ]] || return 0
+
+  parent=$(jq -r '.parent_task_id' "$state")
+  rel_plan=$(jq -r '.plan' "$state")
+  plan="$ROOT/$rel_plan"
+  lower=$(print -r -- "$resolution" | tr '[:upper:]' '[:lower:]')
+
+  if [[ "$lower" == *approve* || "$lower" == *execute* || "$lower" == "yes" ]]; then
+    "$PRODUCT_PLAN" set-status "$plan" approved || return 1
+    "$ORCA" orchestration task-update --id "$parent" --status ready --json >/dev/null 2>&1 || true
+    "$ORCA" orchestration dispatch --task "$parent" --to "$CLAUDE_HANDLE" --inject --json >/dev/null || {
+      notify_claude "The product plan $rel_plan was approved, but Orca could not dispatch it. Read the approved plan and execute it with /ug-product-manager."
+      return 1
+    }
+    "$PRODUCT_PLAN" set-status "$plan" in_progress || return 1
+    update_state_handled "$state" "$resolution"
+    log "Approved and dispatched: $rel_plan"
+  elif [[ "$lower" == *reject* ]]; then
+    "$PRODUCT_PLAN" set-status "$plan" rejected || return 1
+    "$ORCA" orchestration task-update --id "$parent" --status failed --result '{"decision":"rejected"}' --json >/dev/null 2>&1 || true
+    update_state_handled "$state" "$resolution"
+    notify_claude "The user rejected product plan $rel_plan. Do not execute it."
+    log "Rejected: $rel_plan"
+  else
+    "$PRODUCT_PLAN" set-status "$plan" draft || return 1
+    "$ORCA" orchestration task-update --id "$parent" --status blocked --result '{"decision":"revise"}' --json >/dev/null 2>&1 || true
+    update_state_handled "$state" "$resolution"
+    notify_claude "The user requested changes to product plan $rel_plan. Resolution: $resolution. Revise the business plan, render it, set status awaiting_approval, and stop for a new gate."
+    log "Revision requested: $rel_plan"
+  fi
+}
+
+[[ -n "$CLAUDE_HANDLE" ]] || { print -u2 -- "Usage: $0 <orca-claude-terminal-handle>"; exit 2; }
+[[ -n "$ORCA" && -x "$ORCA" ]] || { print -u2 -- "Orca CLI not found"; exit 2; }
+[[ -x "$PRODUCT_PLAN" ]] || { print -u2 -- "product-plan is not executable: $PRODUCT_PLAN"; exit 2; }
+command -v jq >/dev/null || { print -u2 -- "jq is required"; exit 2; }
+
+mkdir -p "$PLAN_DIR" "$STATE_DIR"
+cd "$ROOT" || exit 2
+log "Watching business plans. No material product execution starts without approval."
+
+while true; do
+  for plan in "$PLAN_DIR"/*.json(N); do
+    state=$(state_path_for "$plan")
+    if state_needs_registration "$plan" "$state"; then
+      register_plan "$plan" "$state" || {
+        log "Could not create the approval gate for ${plan:t}. Stopping to avoid unapproved execution."
+        exit 1
+      }
+    fi
+  done
+
+  for state in "$STATE_DIR"/*.json(N); do
+    [[ "$(jq -r '.gate_handled // false' "$state")" == "false" ]] || continue
+    handle_gate "$state" || {
+      log "Could not apply the gate decision for ${state:t}. Stopping."
+      exit 1
+    }
+  done
+
+  if ! "$ORCA" terminal show --terminal "$CLAUDE_HANDLE" --json >/dev/null 2>&1; then
+    log "Claude terminal is no longer available. Plan gate is stopping."
+    exit 0
+  fi
+  sleep 3
+done

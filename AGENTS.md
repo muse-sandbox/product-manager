@@ -6,6 +6,8 @@ Use only the current operator's own locally authenticated accounts in Orca and i
 
 Read drafts from `workspace/drafts/claude/` and write reviews to `workspace/reviews/codex/`. Never edit a Claude draft in place. A review must verify evidence, analytics validity, product logic, solution-space coverage, and decision readiness. Use verdicts `READY`, `READY WITH CHANGES`, or `NOT READY`.
 
+For material work, inspect the approved business plan under `workspace/plans/`. Verify that the draft preserves fixed decisions, incorporates Discovery findings, and does not silently change scope, population, primary metric, experiment structure, or deliverable. Do not penalize a Delivery document for omitting solution alternatives when the approved plan records the mechanism as fixed.
+
 Use `.claude/skills/ug-product-manager/SKILL.md` as the canonical authoring workflow when its product methods are needed for reference. Claude Code exposes it as `/ug-product-manager`.
 
 Treat the sibling `ug-analytics` project as a separate read-only dependency. Invoke its stable `ug-analytics` CLI interface and feature-detect commands through `ug-analytics --help`. When the sibling layout is unavailable, use `UG_ANALYTICS_DIR`. Do not import private modules or edit the analytics repository from this project.

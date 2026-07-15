@@ -1,4 +1,4 @@
 interface:
   display_name: "UG Product Manager"
-  short_description: "Shape evidence-backed UG product experiments"
-  default_prompt: "Use $ug-product-manager to turn a vague product request into an evidence-backed experiment plan and a concise UG document."
+  short_description: "Plan and execute controlled product work"
+  default_prompt: "Use $ug-product-manager to clarify this request and propose a Discovery/Delivery plan for my approval before executing it."

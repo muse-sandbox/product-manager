@@ -1,0 +1,338 @@
+#!/usr/bin/env python3
+
+"""Validate, render, and update business-readable product plans."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+PLAN_STATUSES = {
+    "draft",
+    "awaiting_approval",
+    "approved",
+    "in_progress",
+    "needs_reapproval",
+    "completed",
+    "rejected",
+}
+TASK_STATUSES = {"pending", "in_progress", "completed", "blocked", "skipped"}
+PHASES = {"Discovery", "Delivery", "Review"}
+
+
+def die(message: str) -> None:
+    raise SystemExit(f"product-plan: {message}")
+
+
+def now() -> str:
+    return dt.datetime.now(dt.timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def load(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        die(f"plan not found: {path}")
+    except json.JSONDecodeError as exc:
+        die(f"invalid JSON in {path}: {exc}")
+    validate_data(data)
+    return data
+
+
+def validate_data(data: dict) -> None:
+    required = ["schema_version", "slug", "title", "goal", "status", "decision_state", "deliverable", "tasks"]
+    missing = [key for key in required if key not in data]
+    if missing:
+        die(f"missing required fields: {', '.join(missing)}")
+    if data["schema_version"] != 1:
+        die("schema_version must be 1")
+    if data["status"] not in PLAN_STATUSES:
+        die(f"invalid plan status: {data['status']}")
+    if not isinstance(data["tasks"], list) or not data["tasks"]:
+        die("tasks must contain at least one business task")
+    decision = data["decision_state"]
+    if not isinstance(decision, dict) or not all(key in decision for key in ("stage", "fixed", "open")):
+        die("decision_state must contain stage, fixed, and open")
+    ids: set[str] = set()
+    for index, task in enumerate(data["tasks"], start=1):
+        for key in ("id", "phase", "title", "why", "owner", "done_when", "status"):
+            if key not in task:
+                die(f"task {index} is missing {key}")
+        if task["id"] in ids:
+            die(f"duplicate task id: {task['id']}")
+        ids.add(task["id"])
+        if task["phase"] not in PHASES:
+            die(f"task {task['id']} has invalid phase: {task['phase']}")
+        if task["status"] not in TASK_STATUSES:
+            die(f"task {task['id']} has invalid status: {task['status']}")
+
+
+def atomic_write(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data["updated_at"] = now()
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as handle:
+        json.dump(data, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+        temp_name = handle.name
+    os.replace(temp_name, path)
+
+
+def clean(value: object) -> str:
+    if value is None or value == "":
+        return "—"
+    return str(value).replace("|", "\\|").replace("\n", "<br>")
+
+
+def bullets(items: list[str]) -> str:
+    if not items:
+        return "- None"
+    return "\n".join(f"- {item}" for item in items)
+
+
+def render_text(data: dict, source: Path) -> str:
+    decision = data["decision_state"]
+    questions = data.get("questions_for_user", [])
+    assumptions = data.get("assumptions", [])
+    active = next((task for task in data["tasks"] if task["status"] == "in_progress"), None)
+    lines = [
+        "---",
+        f"plan_slug: {data['slug']}",
+        f"status: {data['status']}",
+        f"stage: {decision['stage']}",
+        f"updated_at: {data.get('updated_at', '—')}",
+        f"source: {source.name}",
+        "---",
+        "",
+        f"# {data['title']}",
+        "",
+        "## Goal",
+        "",
+        data["goal"],
+        "",
+        "## Decision state",
+        "",
+        f"**Stage:** {decision['stage']}",
+        "",
+        "**Already fixed**",
+        "",
+        bullets(decision.get("fixed", [])),
+        "",
+        "**Still open**",
+        "",
+        bullets(decision.get("open", [])),
+        "",
+        "## Approval needed",
+        "",
+        bullets(questions),
+        "",
+        "## Current work",
+        "",
+        (f"**{active['id']} — {active['title']}**  \n{active['why']}" if active else "No task is running."),
+        "",
+        "## Product work",
+        "",
+        "| ID | Phase | Business task | Why it matters | Owner | Done when | Status | Finding |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for task in data["tasks"]:
+        lines.append(
+            "| "
+            + " | ".join(
+                clean(task.get(key))
+                for key in ("id", "phase", "title", "why", "owner", "done_when", "status", "finding")
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Assumptions",
+            "",
+            bullets(assumptions),
+            "",
+            "## Deliverable",
+            "",
+            data["deliverable"],
+            "",
+            "## Intervention rule",
+            "",
+            "Pause and request re-approval if Discovery changes the fixed decision, target population, primary metric, experiment design, or promised deliverable.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def rendered_path(path: Path) -> Path:
+    return path.with_suffix(".md")
+
+
+def render(path: Path, data: dict | None = None) -> Path:
+    data = data or load(path)
+    output = rendered_path(path)
+    output.write_text(render_text(data, path))
+    return output
+
+
+def repository_root(path: Path) -> Path:
+    current = path.resolve().parent
+    for candidate in [current, *current.parents]:
+        if (candidate / ".git").exists():
+            return candidate
+    die(f"cannot locate repository root for {path}")
+
+
+def sync_orca(path: Path, data: dict, task_id: str | None = None) -> None:
+    root = repository_root(path)
+    state_path = root / ".orca" / "state" / "plans" / f"{data['slug']}.json"
+    if not state_path.exists():
+        return
+    try:
+        state = json.loads(state_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    orca = os.environ.get("ORCA_BIN") or shutil.which("orca")
+    if not orca:
+        return
+    status_map = {
+        "pending": "pending",
+        "in_progress": "dispatched",
+        "completed": "completed",
+        "blocked": "blocked",
+        "skipped": "completed",
+    }
+    if task_id:
+        orca_id = state.get("task_ids", {}).get(task_id)
+        task = next((item for item in data["tasks"] if item["id"] == task_id), None)
+        if orca_id and task:
+            command = [orca, "orchestration", "task-update", "--id", orca_id, "--status", status_map[task["status"]]]
+            finding = task.get("finding")
+            if finding:
+                command += ["--result", json.dumps({"finding": finding}, ensure_ascii=False)]
+            subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    parent = state.get("parent_task_id")
+    if parent and data["status"] in {"completed", "needs_reapproval", "rejected"}:
+        parent_status = {"completed": "completed", "needs_reapproval": "blocked", "rejected": "failed"}[data["status"]]
+        subprocess.run(
+            [orca, "orchestration", "task-update", "--id", parent, "--status", parent_status],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
+
+def set_status(path: Path, status: str) -> None:
+    if status not in PLAN_STATUSES:
+        die(f"invalid plan status: {status}")
+    data = load(path)
+    data["status"] = status
+    if status == "approved":
+        data["approved_at"] = now()
+    atomic_write(path, data)
+    render(path, data)
+    sync_orca(path, data)
+
+
+def set_task(path: Path, task_id: str, status: str, finding: str | None) -> None:
+    if status not in TASK_STATUSES:
+        die(f"invalid task status: {status}")
+    data = load(path)
+    task = next((item for item in data["tasks"] if item["id"] == task_id), None)
+    if task is None:
+        die(f"unknown task id: {task_id}")
+    task["status"] = status
+    if finding is not None:
+        task["finding"] = finding
+    if status == "in_progress":
+        data["status"] = "in_progress"
+        data["current_phase"] = task["phase"]
+    terminal = {"completed", "skipped"}
+    if all(item["status"] in terminal for item in data["tasks"]):
+        data["status"] = "completed"
+        data["current_phase"] = "Complete"
+    atomic_write(path, data)
+    render(path, data)
+    sync_orca(path, data, task_id)
+
+
+def summary(data: dict, path: Path) -> str:
+    decision = data["decision_state"]
+    task_lines = [
+        f"- {task['id']} [{task['phase']}] {task['title']}: {task['why']} (owner: {task['owner']}; done when: {task['done_when']})"
+        for task in data["tasks"]
+    ]
+    return "\n".join(
+        [
+            f"Goal: {data['goal']}",
+            f"Decision stage: {decision['stage']}",
+            f"Already fixed: {'; '.join(decision.get('fixed', [])) or 'None'}",
+            f"Still open: {'; '.join(decision.get('open', [])) or 'None'}",
+            f"Plan: {path.with_suffix('.md')}",
+            "Business tasks:",
+            *task_lines,
+            f"Deliverable: {data['deliverable']}",
+            "Execution contract: use $ug-product-manager; execute only this approved plan; keep the plan current; pause for re-approval if a material premise changes.",
+        ]
+    )
+
+
+def list_plans(directory: Path) -> None:
+    rows = []
+    for path in sorted(directory.glob("*.json")):
+        try:
+            data = load(path)
+        except SystemExit:
+            continue
+        active = next((task["title"] for task in data["tasks"] if task["status"] == "in_progress"), "—")
+        rows.append((data["slug"], data["status"], data["decision_state"]["stage"], active))
+    if not rows:
+        print("No product plans found.")
+        return
+    print("SLUG\tSTATUS\tSTAGE\tCURRENT WORK")
+    for row in rows:
+        print("\t".join(row))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name in ("validate", "render", "summary"):
+        command = sub.add_parser(name)
+        command.add_argument("plan", type=Path)
+    status = sub.add_parser("set-status")
+    status.add_argument("plan", type=Path)
+    status.add_argument("status")
+    task = sub.add_parser("task")
+    task.add_argument("plan", type=Path)
+    task.add_argument("task_id")
+    task.add_argument("status")
+    task.add_argument("--finding")
+    listing = sub.add_parser("list")
+    listing.add_argument("directory", type=Path, nargs="?", default=Path("workspace/plans"))
+    args = parser.parse_args()
+
+    if args.command == "validate":
+        load(args.plan)
+        print(f"OK {args.plan}")
+    elif args.command == "render":
+        print(render(args.plan))
+    elif args.command == "summary":
+        print(summary(load(args.plan), args.plan))
+    elif args.command == "set-status":
+        set_status(args.plan, args.status)
+    elif args.command == "task":
+        set_task(args.plan, args.task_id, args.status, args.finding)
+    elif args.command == "list":
+        list_plans(args.directory)
+
+
+if __name__ == "__main__":
+    main()

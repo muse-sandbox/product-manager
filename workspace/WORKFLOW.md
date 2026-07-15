@@ -1,11 +1,22 @@
-# Claude Code -> Codex -> Confluence
+# Plan approval -> Claude Code -> Codex -> Confluence
+
+## Controlled product plan
+
+1. Claude Code creates `workspace/plans/<slug>.json` and renders `<slug>.md` as a business-readable task cockpit.
+2. Orca creates product tasks and an approval gate from that plan.
+3. The user approves, requests revision, or rejects the plan in Orca.
+4. Only an approved plan is dispatched to Claude Code.
+5. Claude updates task statuses and findings as Discovery and Delivery progress.
+6. A material change to scope, population, primary metric, experiment structure, or deliverable creates a new approval gate.
+
+The cockpit contains business questions and outputs, never shell commands or file operations.
 
 ## Artifact states
 
 1. Claude Code writes the first decision-ready artifact to `workspace/drafts/claude/` and sets `status: ready-for-review` only when its turn is complete.
 2. Orca waits for the Claude terminal to become idle and starts Codex for any ready draft whose content hash has not been reviewed.
 3. Codex writes an independent review to `workspace/reviews/codex/` without editing the draft and records the exact `draft_sha256`.
-4. Orca sends the verified review path back to the original Claude terminal.
+4. Orca creates a revision task and injects the verified review into the original Claude terminal.
 5. Claude Code resolves the review and writes the accepted version to `workspace/final/`.
 6. Confluence is updated only after explicit user approval.
 
@@ -16,6 +27,7 @@
 authoring_agent: claude-code
 status: ready-for-review
 created: YYYY-MM-DD
+product_plan: workspace/plans/example.json
 source_experiments: []
 source_confluence_pages: []
 ---
