@@ -6,8 +6,14 @@ The project deliberately separates responsibilities:
 
 - Claude Code with `ug-product-manager` shapes and documents product decisions.
 - Codex with `ug-product-reviewer` independently audits the draft.
-- `/Users/elzira/my-proj/ug-analytics` supplies read-only experiment data through its CLI.
-- `/Users/elzira/my-proj/work/automations/confluence_tools` supplies self-hosted Confluence context and publishes approved final documents.
+- The sibling `ug-analytics` project supplies read-only experiment data through its CLI.
+- `CONFLUENCE_TOOLS_DIR` selects the local self-hosted Confluence tool used for context and approved publication.
+
+Both skills live under `.claude/skills/`. The `.agents` path is a symlink to `.claude`, allowing Codex and Claude Code to discover the same canonical files without maintaining copies.
+
+## Accounts and authentication
+
+Orca does not provide or share credentials for this project. Each operator must sign in with their own accounts and keep authentication local to their machine. Claude Code, Codex, and Git operations launched through Orca inherit those local sessions. Corporate GitHub access must use the operator's assigned corporate account; do not copy another person's tokens, cookies, SSH keys, or account configuration.
 
 ## Use with Claude Code
 
@@ -23,7 +29,11 @@ Claude may also invoke it automatically when a request matches the skill descrip
 
 ## Desktop launcher
 
-Double-click `Claude — UG Product Manager.command` on the desktop. The launcher opens this repository in Orca, starts Claude Code as the primary author, and starts a second Orca-managed handoff terminal. It also grants Claude access to `/Users/elzira/my-proj/ug-analytics` and the local Confluence tool.
+Double-click `Claude — UG Product Manager.command` on the desktop. The launcher opens this repository in Orca, starts Claude Code as the primary author, and starts a second Orca-managed handoff terminal. It also grants Claude access to the sibling analytics project and the configured local Confluence tool.
+
+The launcher derives the repository path from its own location. It uses `UG_ANALYTICS_DIR` and `CONFLUENCE_TOOLS_DIR` when dependencies are not in the default sibling layout, and `ORCA_BIN`, `CLAUDE_BIN`, or `CODEX_BIN` when the corresponding CLI is not discoverable automatically.
+
+The launcher never selects an account or injects credentials. Confirm the active Orca, Claude Code, Codex, and corporate GitHub accounts before starting work.
 
 Example:
 
@@ -57,4 +67,4 @@ See `workspace/WORKFLOW.md` for the artifact handoff contract.
 
 ## Confluence safety
 
-The Confluence tool is local and targets self-hosted `alice.mu.se`. The agent uses `bash scripts/cnfl` from `/Users/elzira/my-proj/work/automations/confluence_tools`; it must not use Atlassian Cloud MCP. Reads are part of context gathering. Push, create, move, and attachment operations require explicit approval after Codex review.
+The Confluence tool is local and targets self-hosted `alice.mu.se`. The agent runs `bash scripts/cnfl` from `CONFLUENCE_TOOLS_DIR`; it must not use Atlassian Cloud MCP. Reads are part of context gathering. Push, create, move, and attachment operations require explicit approval after Codex review.

@@ -1,5 +1,7 @@
 # Orca handoff
 
+Orca and every CLI it launches must use the current operator's own locally authenticated accounts. The handoff does not inject credentials, switch accounts, or reuse another person's session. Corporate GitHub operations must keep the operator's assigned corporate account and existing local Git configuration.
+
 The desktop launcher starts two Orca-managed terminals in this repository:
 
 1. `Claude · UG Product Manager` — the primary author.

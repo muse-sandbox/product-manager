@@ -2,16 +2,17 @@
 
 ## Tool location
 
-Treat `/Users/elzira/my-proj/work/automations/confluence_tools` as a separate dependency. It connects to self-hosted Confluence at `alice.mu.se`.
+Treat the directory selected by `CONFLUENCE_TOOLS_DIR` as a separate dependency. The project launcher defaults it from the repository's sibling layout. It connects to self-hosted Confluence at `alice.mu.se`.
 
 Never use Atlassian Cloud MCP or another Confluence connector. Use only the repository wrapper from its own working directory:
 
 ```bash
-cd /Users/elzira/my-proj/work/automations/confluence_tools
+: "${CONFLUENCE_TOOLS_DIR:?Set CONFLUENCE_TOOLS_DIR to the local Confluence tool}"
+cd "$CONFLUENCE_TOOLS_DIR"
 bash scripts/cnfl --help
 bash scripts/cnfl search "query"
 bash scripts/cnfl pull PAGE_ID
-/opt/homebrew/bin/python3.13 scripts/extract_text.py PAGE_ID 20000
+python3 scripts/extract_text.py PAGE_ID 20000
 ```
 
 Do not print or copy `.env`, tokens, usernames, or credentials.

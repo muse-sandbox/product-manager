@@ -2,13 +2,44 @@
 
 set -euo pipefail
 
-readonly ROOT="/Users/elzira/my-proj/ug-product-manager"
-readonly ORCA_APP="/Applications/Orca 2.app"
-readonly ORCA="$ORCA_APP/Contents/Resources/bin/orca"
-readonly CLAUDE="/Users/elzira/.local/bin/claude"
-readonly ANALYTICS="/Users/elzira/my-proj/ug-analytics"
-readonly CONFLUENCE="/Users/elzira/my-proj/work/automations/confluence_tools"
-readonly HANDOFF="$ROOT/scripts/orca-handoff"
+readonly SCRIPT_DIR="${0:A:h}"
+readonly ROOT="${SCRIPT_DIR:h}"
+readonly PROJECTS_ROOT="${PROJECTS_ROOT:-${ROOT:h}}"
+readonly ANALYTICS="${UG_ANALYTICS_DIR:-$PROJECTS_ROOT/ug-analytics}"
+readonly CONFLUENCE="${CONFLUENCE_TOOLS_DIR:-$PROJECTS_ROOT/work/automations/confluence_tools}"
+readonly HANDOFF="$SCRIPT_DIR/orca-handoff"
+
+application_cli() {
+  local application_name="$1"
+  local relative_cli="$2"
+  local application_path
+
+  application_path=$(osascript -e "POSIX path of (path to application \"$application_name\")" 2>/dev/null) || return 1
+  print -r -- "${application_path%/}/$relative_cli"
+}
+
+resolve_cli() {
+  local override="$1"
+  local command_name="$2"
+  local application_name="$3"
+  local relative_cli="$4"
+  local discovered
+
+  if [[ -n "$override" ]]; then
+    print -r -- "$override"
+    return 0
+  fi
+
+  discovered=$(command -v "$command_name" 2>/dev/null) && {
+    print -r -- "$discovered"
+    return 0
+  }
+
+  application_cli "$application_name" "$relative_cli"
+}
+
+readonly ORCA="$(resolve_cli "${ORCA_BIN:-}" orca "Orca 2" "Contents/Resources/bin/orca" || true)"
+readonly CLAUDE="$(resolve_cli "${CLAUDE_BIN:-}" claude "Claude" "Contents/MacOS/claude" || true)"
 
 fail() {
   print -u2 -- "UG Product Flow: $*"
@@ -28,9 +59,11 @@ terminal_handle() {
   ] | map(select(type == "string" and length > 0)) | .[0] // empty'
 }
 
-[[ -x "$ORCA" ]] || fail "Orca CLI not found at $ORCA"
-[[ -x "$CLAUDE" ]] || fail "Claude Code not found at $CLAUDE"
+[[ -n "$ORCA" && -x "$ORCA" ]] || fail "Orca CLI not found. Put 'orca' on PATH or set ORCA_BIN."
+[[ -n "$CLAUDE" && -x "$CLAUDE" ]] || fail "Claude Code not found. Put 'claude' on PATH or set CLAUDE_BIN."
 [[ -x "$HANDOFF" ]] || fail "handoff runner is not executable: $HANDOFF"
+[[ -d "$ANALYTICS" ]] || fail "ug-analytics not found: $ANALYTICS. Set UG_ANALYTICS_DIR."
+[[ -d "$CONFLUENCE" ]] || fail "Confluence tools not found: $CONFLUENCE. Set CONFLUENCE_TOOLS_DIR."
 command -v jq >/dev/null || fail "jq is required"
 
 cd "$ROOT" || fail "cannot open $ROOT"

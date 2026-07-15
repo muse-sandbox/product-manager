@@ -1,6 +1,6 @@
 # ug-analytics dependency
 
-Use the sibling project at `/Users/elzira/my-proj/ug-analytics` as the deterministic, read-only analytics interface. Do not duplicate its API parsing inside the product skill and do not edit that repository while performing product work.
+Use the sibling `ug-analytics` project as the deterministic, read-only analytics interface. When the sibling layout is unavailable, locate it through `UG_ANALYTICS_DIR`. Do not duplicate its API parsing inside the product skill and do not edit that repository while performing product work.
 
 ## Discover available commands
 
@@ -19,7 +19,7 @@ ug-analytics EXP_ID --section runs
 
 The analytics project specification describes future `raw`, `list`, `show`, and `daily` subcommands, but they may not yet be implemented. Feature-detect them through `--help`; never assume availability.
 
-If the CLI is not installed, use the project environment from `/Users/elzira/my-proj/ug-analytics` according to its README. Do not expose or print `UG_COOKIE`.
+If the CLI is not installed, use the project environment selected by `UG_ANALYTICS_DIR` according to its README. Do not expose or print `UG_COOKIE`.
 
 ## Data interpretation checklist
 

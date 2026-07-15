@@ -2,14 +2,45 @@
 
 set -u
 
-readonly ROOT="/Users/elzira/my-proj/ug-product-manager"
-readonly ORCA="/Applications/Orca 2.app/Contents/Resources/bin/orca"
-readonly CODEX="/Applications/ChatGPT.app/Contents/Resources/codex"
+readonly SCRIPT_DIR="${0:A:h}"
+readonly ROOT="${SCRIPT_DIR:h}"
 readonly DRAFT_DIR="$ROOT/workspace/drafts/claude"
 readonly REVIEW_DIR="$ROOT/workspace/reviews/codex"
 readonly LOG_DIR="$ROOT/.orca/logs"
 readonly LOCK_DIR="$ROOT/.orca/handoff.lock"
 readonly CLAUDE_HANDLE="${1:-}"
+
+application_cli() {
+  local application_name="$1"
+  local relative_cli="$2"
+  local application_path
+
+  application_path=$(osascript -e "POSIX path of (path to application \"$application_name\")" 2>/dev/null) || return 1
+  print -r -- "${application_path%/}/$relative_cli"
+}
+
+resolve_cli() {
+  local override="$1"
+  local command_name="$2"
+  local application_name="$3"
+  local relative_cli="$4"
+  local discovered
+
+  if [[ -n "$override" ]]; then
+    print -r -- "$override"
+    return 0
+  fi
+
+  discovered=$(command -v "$command_name" 2>/dev/null) && {
+    print -r -- "$discovered"
+    return 0
+  }
+
+  application_cli "$application_name" "$relative_cli"
+}
+
+readonly ORCA="$(resolve_cli "${ORCA_BIN:-}" orca "Orca 2" "Contents/Resources/bin/orca" || true)"
+readonly CODEX="$(resolve_cli "${CODEX_BIN:-}" codex "ChatGPT" "Contents/Resources/codex" || true)"
 
 log() {
   print -- "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
@@ -131,8 +162,8 @@ fi
   print -u2 -- "Usage: $0 <orca-claude-terminal-handle>"
   exit 2
 }
-[[ -x "$ORCA" ]] || { print -u2 -- "Orca CLI not found: $ORCA"; exit 2; }
-[[ -x "$CODEX" ]] || { print -u2 -- "Codex CLI not found: $CODEX"; exit 2; }
+[[ -n "$ORCA" && -x "$ORCA" ]] || { print -u2 -- "Orca CLI not found. Put 'orca' on PATH or set ORCA_BIN."; exit 2; }
+[[ -n "$CODEX" && -x "$CODEX" ]] || { print -u2 -- "Codex CLI not found. Put 'codex' on PATH or set CODEX_BIN."; exit 2; }
 
 mkdir -p "$REVIEW_DIR" "$LOG_DIR"
 cd "$ROOT" || exit 2
