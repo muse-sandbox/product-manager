@@ -23,7 +23,7 @@ Claude may also invoke it automatically when a request matches the skill descrip
 
 ## Desktop launcher
 
-Double-click `Claude — UG Product Manager.command` on the desktop. The launcher opens Claude Code in this project, grants read access to `/Users/elzira/my-proj/ug-analytics`, and configures the Python path required by the current `ug-analytics` installation.
+Double-click `Claude — UG Product Manager.command` on the desktop. The launcher opens this repository in Orca, starts Claude Code as the primary author, and starts a second Orca-managed handoff terminal. It also grants Claude access to `/Users/elzira/my-proj/ug-analytics` and the local Confluence tool.
 
 Example:
 
@@ -35,27 +35,23 @@ mechanisms, and draft only the supported Pitch sections.
 
 The skill must not invent metrics, research, ownership, or forecast inputs. Missing evidence is an explicit output.
 
-## Two-agent workflow
+## Automatic two-agent workflow
 
-1. In Claude Code:
+1. In the Claude tab in Orca:
 
    ```text
    /ug-product-manager The request is "add a banner for Official tabs". Search relevant Confluence context and prior experiment data, then save a review-ready draft.
    ```
 
-2. Open this same repository in Codex and run:
+2. Claude saves the completed draft with `status: ready-for-review`. Orca waits until Claude is idle, then starts Codex in a separate tab with `$ug-product-reviewer`.
 
-   ```text
-   Use $ug-product-reviewer to review workspace/drafts/claude/<draft>.md independently.
-   ```
+3. Codex saves the review with the exact draft SHA-256. Orca verifies the hash and sends the review back to the same Claude session.
 
-3. Back in Claude Code:
+4. Claude resolves every blocker and major finding and saves the accepted artifact under `workspace/final/`.
 
-   ```text
-   Read workspace/reviews/codex/<draft>-review.md. Resolve every blocker and major finding, record any evidence-backed disagreement, and save the accepted version under workspace/final/.
-   ```
+5. Only after checking the final artifact, explicitly ask Claude Code to publish it to a named Confluence page.
 
-4. Only after checking the final artifact, explicitly ask Claude Code to publish it to a named Confluence page.
+An unchanged draft is not reviewed twice. If the draft changes, its hash changes and Orca automatically requests a fresh review. See `.orca/README.md` for the handoff contract.
 
 See `workspace/WORKFLOW.md` for the artifact handoff contract.
 

@@ -1,0 +1,175 @@
+#!/bin/zsh
+
+set -u
+
+readonly ROOT="/Users/elzira/my-proj/ug-product-manager"
+readonly ORCA="/Applications/Orca 2.app/Contents/Resources/bin/orca"
+readonly CODEX="/Applications/ChatGPT.app/Contents/Resources/codex"
+readonly DRAFT_DIR="$ROOT/workspace/drafts/claude"
+readonly REVIEW_DIR="$ROOT/workspace/reviews/codex"
+readonly LOG_DIR="$ROOT/.orca/logs"
+readonly LOCK_DIR="$ROOT/.orca/handoff.lock"
+readonly CLAUDE_HANDLE="${1:-}"
+
+log() {
+  print -- "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+terminal_handle() {
+  jq -r '[
+    .result.startupTerminal.handle?,
+    .result.terminal.handle?,
+    .result.terminalHandle?,
+    .result.handle?,
+    .result.terminal?,
+    .terminal.handle?,
+    .terminalHandle?,
+    .handle?
+  ] | map(select(type == "string" and length > 0)) | .[0] // empty'
+}
+
+relative_path() {
+  print -r -- "${1#$ROOT/}"
+}
+
+review_path_for() {
+  local draft="$1"
+  local stem="${draft:t:r}"
+  print -r -- "$REVIEW_DIR/${stem}-review.md"
+}
+
+frontmatter_status_is_ready() {
+  sed -n '1,35p' "$1" | grep -Eq '^status:[[:space:]]*["'\'']?ready-for-review["'\'']?[[:space:]]*$'
+}
+
+draft_hash() {
+  shasum -a 256 "$1" | awk '{print $1}'
+}
+
+reviewed_hash() {
+  local review="$1"
+  [[ -f "$review" ]] || return 0
+  sed -n '1,40p' "$review" | awk '/^draft_sha256:[[:space:]]*/ { sub(/^draft_sha256:[[:space:]]*/, ""); gsub(/["'\'']/, ""); print; exit }'
+}
+
+next_pending_draft() {
+  local draft review current_hash previous_hash
+  for draft in "$DRAFT_DIR"/*.md(N); do
+    frontmatter_status_is_ready "$draft" || continue
+    review=$(review_path_for "$draft")
+    current_hash=$(draft_hash "$draft")
+    previous_hash=$(reviewed_hash "$review")
+    if [[ "$current_hash" != "$previous_hash" ]]; then
+      print -r -- "$draft"
+      return 0
+    fi
+  done
+  return 1
+}
+
+notify_claude() {
+  local message="$1"
+  "$ORCA" terminal send --terminal "$CLAUDE_HANDLE" --text "$message" --enter --json >/dev/null
+}
+
+review_draft() {
+  local draft="$1"
+  local review current_hash rel_draft rel_review output_file prompt codex_command create_json codex_handle final_hash
+
+  review=$(review_path_for "$draft")
+  current_hash=$(draft_hash "$draft")
+  rel_draft=$(relative_path "$draft")
+  rel_review=$(relative_path "$review")
+  output_file="$LOG_DIR/${draft:t:r}-codex-last-message.md"
+
+  prompt="Use \$ug-product-reviewer to independently review $rel_draft. Read the exact draft and its cited sources. Do not edit the Claude draft. Save the complete review to $rel_review. The YAML header must include draft: $rel_draft and draft_sha256: $current_hash. Follow the verdict and severity contract in the skill. Do not publish or write to Confluence."
+  codex_command="exec ${(q)CODEX} exec -C ${(q)ROOT} -s workspace-write -o ${(q)output_file} ${(q)prompt}"
+
+  log "Starting Codex review for $rel_draft"
+  create_json=$("$ORCA" terminal create \
+    --worktree "path:$ROOT" \
+    --title "Codex review · ${draft:t:r}" \
+    --command "$codex_command" \
+    --json) || {
+      notify_claude "Orca could not start Codex for $rel_draft. The draft remains ready-for-review; no finalization was requested."
+      return 1
+    }
+
+  codex_handle=$(print -r -- "$create_json" | terminal_handle)
+  if [[ -z "$codex_handle" ]]; then
+    notify_claude "Orca started a Codex tab for $rel_draft but received no terminal handle. Check the Orca handoff tab."
+    return 1
+  fi
+
+  "$ORCA" terminal wait --terminal "$codex_handle" --for exit --timeout-ms 7200000 --json >/dev/null || {
+    notify_claude "Codex did not finish the review of $rel_draft within two hours. Check the Codex tab in Orca."
+    return 1
+  }
+
+  final_hash=$(reviewed_hash "$review")
+  if [[ ! -f "$review" || "$final_hash" != "$current_hash" ]]; then
+    notify_claude "Codex finished, but $rel_review is missing or does not match the current draft hash. Do not finalize; inspect the Codex and handoff tabs."
+    return 1
+  fi
+
+  log "Codex review is ready: $rel_review"
+  notify_claude "Codex finished the independent review: $rel_review. Read it now. Resolve every BLOCKER and MAJOR finding, or record a source-backed disagreement. Save the accepted artifact under workspace/final/ with a link to this review. Do not publish to Confluence without explicit user approval."
+}
+
+if [[ "$CLAUDE_HANDLE" == "--check" ]]; then
+  cd "$ROOT" || exit 2
+  pending=$(next_pending_draft)
+  if [[ -n "$pending" ]]; then
+    print -- "PENDING $(relative_path "$pending")"
+    exit 10
+  fi
+  print -- "OK no ready draft needs a Codex review"
+  exit 0
+fi
+
+[[ -n "$CLAUDE_HANDLE" ]] || {
+  print -u2 -- "Usage: $0 <orca-claude-terminal-handle>"
+  exit 2
+}
+[[ -x "$ORCA" ]] || { print -u2 -- "Orca CLI not found: $ORCA"; exit 2; }
+[[ -x "$CODEX" ]] || { print -u2 -- "Codex CLI not found: $CODEX"; exit 2; }
+
+mkdir -p "$REVIEW_DIR" "$LOG_DIR"
+cd "$ROOT" || exit 2
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  log "Another Orca handoff runner is already active. This duplicate is stopping."
+  exit 0
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+trap 'exit 130' INT TERM HUP
+
+log "Watching Claude through Orca. A draft is eligible only after status: ready-for-review."
+
+while true; do
+  pending=$(next_pending_draft)
+  if [[ -n "$pending" ]]; then
+    # A ready artifact is still gated on Claude reaching an idle/finished state.
+    "$ORCA" terminal wait --terminal "$CLAUDE_HANDLE" --for tui-idle --timeout-ms 600000 --json >/dev/null 2>&1 || true
+    pending=$(next_pending_draft)
+    if [[ -n "$pending" ]] && ! review_draft "$pending"; then
+      log "The handoff failed and has been stopped to prevent duplicate Codex runs."
+      exit 1
+    fi
+  else
+    "$ORCA" terminal wait --terminal "$CLAUDE_HANDLE" --for tui-idle --timeout-ms 600000 --json >/dev/null 2>&1
+    wait_status=$?
+    pending=$(next_pending_draft)
+    if [[ -n "$pending" ]]; then
+      if ! review_draft "$pending"; then
+        log "The handoff failed and has been stopped to prevent duplicate Codex runs."
+        exit 1
+      fi
+    elif (( wait_status != 0 )); then
+      log "Claude terminal is no longer available. Handoff runner is stopping."
+      exit 0
+    fi
+  fi
+
+  sleep 3
+done

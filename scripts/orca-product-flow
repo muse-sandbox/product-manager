@@ -1,0 +1,68 @@
+#!/bin/zsh
+
+set -euo pipefail
+
+readonly ROOT="/Users/elzira/my-proj/ug-product-manager"
+readonly ORCA_APP="/Applications/Orca 2.app"
+readonly ORCA="$ORCA_APP/Contents/Resources/bin/orca"
+readonly CLAUDE="/Users/elzira/.local/bin/claude"
+readonly ANALYTICS="/Users/elzira/my-proj/ug-analytics"
+readonly CONFLUENCE="/Users/elzira/my-proj/work/automations/confluence_tools"
+readonly HANDOFF="$ROOT/scripts/orca-handoff"
+
+fail() {
+  print -u2 -- "UG Product Flow: $*"
+  exit 1
+}
+
+terminal_handle() {
+  jq -r '[
+    .result.startupTerminal.handle?,
+    .result.terminal.handle?,
+    .result.terminalHandle?,
+    .result.handle?,
+    .result.terminal?,
+    .terminal.handle?,
+    .terminalHandle?,
+    .handle?
+  ] | map(select(type == "string" and length > 0)) | .[0] // empty'
+}
+
+[[ -x "$ORCA" ]] || fail "Orca CLI not found at $ORCA"
+[[ -x "$CLAUDE" ]] || fail "Claude Code not found at $CLAUDE"
+[[ -x "$HANDOFF" ]] || fail "handoff runner is not executable: $HANDOFF"
+command -v jq >/dev/null || fail "jq is required"
+
+cd "$ROOT" || fail "cannot open $ROOT"
+
+if ! "$ORCA" open --json >/dev/null; then
+  fail "Orca did not start. Open $ORCA_APP once and run this launcher again."
+fi
+
+repo_json=$("$ORCA" repo list --json)
+if ! print -r -- "$repo_json" | jq -e --arg root "$ROOT" '.. | objects | select(.path? == $root)' >/dev/null; then
+  "$ORCA" repo add --path "$ROOT" --json >/dev/null || fail "could not add the repository to Orca"
+fi
+
+claude_command="export PYTHONPATH=${(q)ANALYTICS}\${PYTHONPATH:+:\$PYTHONPATH}; exec ${(q)CLAUDE} --add-dir ${(q)ANALYTICS} --add-dir ${(q)CONFLUENCE}"
+claude_json=$("$ORCA" terminal create \
+  --worktree "path:$ROOT" \
+  --title "Claude · UG Product Manager" \
+  --command "$claude_command" \
+  --focus \
+  --json)
+claude_handle=$(print -r -- "$claude_json" | terminal_handle)
+[[ -n "$claude_handle" ]] || fail "Orca created Claude, but returned no terminal handle"
+
+handoff_command="exec ${(q)HANDOFF} ${(q)claude_handle}"
+handoff_json=$("$ORCA" terminal create \
+  --worktree "path:$ROOT" \
+  --title "Orca · Claude → Codex handoff" \
+  --command "$handoff_command" \
+  --json)
+handoff_handle=$(print -r -- "$handoff_json" | terminal_handle)
+[[ -n "$handoff_handle" ]] || fail "Orca created the handoff runner, but returned no terminal handle"
+
+print -- "UG Product Flow is running in Orca."
+print -- "Claude terminal: $claude_handle"
+print -- "Handoff terminal: $handoff_handle"
